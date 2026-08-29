@@ -1,0 +1,14 @@
+{
+  "name": "apple-notes-cli",
+  "version": "1.0.0",
+  "description": "A clean terminal UI for Apple Notes",
+  "type": "module",
+  "bin": {
+    "notes": "bin/notes.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "Tyler Xiao",
+  "license": "MIT"
+}
