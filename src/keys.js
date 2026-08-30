@@ -71,6 +71,7 @@ const COMMON = {
   back: ['escape'],
   prev: ['left'],
   next: ['right'],
+  openExternal: ['o'],
   quit: ['q', 'ctrl+c'],
   help: ['?'],
   refresh: ['r'],

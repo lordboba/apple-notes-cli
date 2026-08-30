@@ -46,6 +46,8 @@ const LIST_SCRIPT = `
     } catch (e) {
       continue;
     }
+    let locked = null;
+    try { locked = folder.notes.passwordProtected(); } catch (e) {}
     for (let i = 0; i < ids.length; i++) {
       out.push({
         id: ids[i],
@@ -53,6 +55,7 @@ const LIST_SCRIPT = `
         folder: folderName,
         modified: modified[i] ? modified[i].toISOString() : null,
         created: created[i] ? created[i].toISOString() : null,
+        locked: locked ? !!locked[i] : false,
       });
     }
   }
@@ -75,9 +78,30 @@ export async function fetchNoteText(id) {
 (() => {
   const app = Application('Notes');
   const note = app.notes.byId(${JSON.stringify(id)});
-  return JSON.stringify({ text: note.plaintext() });
+  let attachments = [];
+  try { attachments = note.attachments.name(); } catch (e) {}
+  return JSON.stringify({ text: note.plaintext(), attachments });
 })()`;
-  const raw = await runJXA(script);
-  // U+FFFC marks inline attachments (images, tables) that plaintext can't carry.
-  return (JSON.parse(raw).text || '').replace(/￼/g, '[attachment]');
+  const { text, attachments } = JSON.parse(await runJXA(script));
+  // U+FFFC marks inline attachments (images, tables) that plaintext can't
+  // carry. They appear in the same order as the note's attachment list, so
+  // substitute each marker with the matching filename.
+  let i = 0;
+  return (text || '').replace(/￼/g, () => {
+    const name = attachments[i++];
+    return name ? `[📎 ${name}]` : '[attachment]';
+  });
+}
+
+// Brings the note up in Notes.app itself. For password-protected notes this
+// is the unlock path: Notes prompts for Touch ID / password, and once the
+// session is unlocked its text becomes readable over Apple Events too.
+export async function openInNotes(id) {
+  const script = `
+(() => {
+  const app = Application('Notes');
+  app.activate();
+  app.notes.byId(${JSON.stringify(id)}).show();
+})()`;
+  await runJXA(script);
 }

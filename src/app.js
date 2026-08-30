@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import * as t from './term.js';
 import { loadConfig, saveConfig, configPath } from './config.js';
 import { parseInput, effectiveBindings, actionFor, prettyKey } from './keys.js';
-import { fetchNoteList, fetchNoteText } from './store.js';
+import { fetchNoteList, fetchNoteText, openInNotes } from './store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
@@ -14,6 +14,12 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 const KEYMAPS = ['hybrid', 'vim', 'emacs'];
 const SORTS = ['modified', 'created', 'title'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const LOCKED_TEXT =
+  '🔒 This note is locked.\n\n' +
+  'macOS only lets Notes.app itself take the password or Touch ID prompt.\n\n' +
+  'Press o to open it in Notes.app and unlock it there, then come back\n' +
+  'and press r to reload the text.';
 
 const state = {
   config: null,
@@ -62,7 +68,7 @@ async function plainList() {
   const notes = sorted(await fetchNoteList(), config.sort);
   const folderW = Math.min(20, Math.max(5, ...notes.map((n) => n.folder.length)));
   for (const n of notes) {
-    console.log(`${fmtDate(n.modified).padEnd(13)} ${n.folder.padEnd(folderW)}  ${n.title}`);
+    console.log(`${fmtDate(n.modified).padEnd(13)} ${n.folder.padEnd(folderW)}  ${n.locked ? '🔒 ' : ''}${n.title}`);
   }
 }
 
@@ -158,8 +164,14 @@ async function openNote(item) {
   startSpinner();
   try {
     const text = await fetchNoteText(item.id);
-    state.bodyCache.set(item.id, text);
-    if (state.note?.id === item.id) state.noteText = text;
+    if (item.locked && !text.trim()) {
+      // Locked notes read as empty until unlocked in Notes.app. Don't cache,
+      // so reopening after an unlock picks up the real text.
+      if (state.note?.id === item.id) state.noteText = LOCKED_TEXT;
+    } else {
+      state.bodyCache.set(item.id, text);
+      if (state.note?.id === item.id) state.noteText = text;
+    }
   } catch (err) {
     if (state.note?.id === item.id) state.noteText = `⚠ Could not load note: ${err.message}`;
   } finally {
@@ -190,7 +202,13 @@ function handleKey(key) {
       break;
     case 'refresh':
       if (state.view === 'list' || state.view === 'error') { state.view = 'list'; loadList(); return; }
+      if (state.view === 'note' && state.note) { state.bodyCache.delete(state.note.id); openNote(state.note); return; }
       break;
+    case 'openExternal': {
+      const target = state.view === 'note' ? state.note : state.view === 'list' ? filtered()[state.sel] : null;
+      if (target) openInNotes(target.id).catch(() => {});
+      break;
+    }
     case 'search':
       if (state.view === 'list') { state.searching = true; }
       break;
@@ -387,7 +405,7 @@ function renderList(l) {
     const metaPlain = `${item.folder} · ${fmtDate(item.modified)}`;
     const meta = t.truncate(metaPlain, Math.max(10, Math.floor(inner * 0.4)));
     const titleW = inner - 2 - 1 - 1 - 1 - t.strWidth(meta) - 1;
-    const title = t.truncate(item.title, Math.max(5, titleW));
+    const title = t.truncate((item.locked ? '🔒 ' : '') + item.title, Math.max(5, titleW));
     const pad = Math.max(1, inner - 2 - 1 - 1 - 1 - t.strWidth(title) - t.strWidth(meta));
     const row =
       t.dim(num) + ' ' +
@@ -428,7 +446,7 @@ function renderNote(l) {
 
   const lines = [
     '',
-    ' ' + t.accent('✳ ') + t.bold(t.truncate(note.title, W - 4)),
+    ' ' + t.accent('✳ ') + t.bold(t.truncate((note.locked ? '🔒 ' : '') + note.title, W - 4)),
     ' ' + t.dim(t.truncate(meta, W - 2)),
     boxTop(W),
   ];
@@ -450,7 +468,7 @@ function renderNote(l) {
   const pct = body.length
     ? Math.min(100, Math.round(((state.noteScroll + bodyRows) / Math.max(body.length, bodyRows)) * 100))
     : 100;
-  lines.push('  ' + t.dim(t.truncate(`${pct}% · ↑↓ scroll · space page · ←→ prev/next · esc back · q quit`, inner + 2)));
+  lines.push('  ' + t.dim(t.truncate(`${pct}% · ↑↓ scroll · space page · ←→ prev/next · o Notes.app · esc back · q quit`, inner + 2)));
   return lines;
 }
 
@@ -469,7 +487,8 @@ function renderHelp(l) {
     ['next', 'Next note (in note view)'],
     ['search', 'Search titles'],
     ['back', 'Back / clear search'],
-    ['refresh', 'Refresh notes'],
+    ['openExternal', 'Open in Notes.app (unlock locked notes there)'],
+    ['refresh', 'Refresh notes / reload note'],
     ['settings', 'Settings'],
     ['help', 'Toggle this help'],
     ['quit', 'Quit'],

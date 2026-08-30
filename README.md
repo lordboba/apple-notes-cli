@@ -46,13 +46,19 @@ both vim and emacs bindings are active by default (the `hybrid` keymap):
 | Prev / next note | ← / →        | `h` / `l`          |                |
 | Back             | esc          |                    | `C-g`          |
 | Search titles    | `/`          |                    |                |
-| Refresh          | `r`          |                    |                |
+| Open in Notes.app| `o`          |                    |                |
+| Refresh / reload | `r`          |                    |                |
 | Settings         | `s`          |                    |                |
 | Help             | `?`          |                    |                |
 | Quit             | `q`, `C-c`   |                    |                |
 
 In the note view, ←/→ (or `h`/`l`) move between notes without going back to
 the list.
+
+Inline attachments show as `[📎 filename]`. Locked notes are marked with 🔒;
+macOS only lets Notes.app itself take the password or Touch ID prompt, so
+press `o` to unlock a note there, then `r` back in the TUI to reload its
+text.
 
 ## Configuration
 
