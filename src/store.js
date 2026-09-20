@@ -2,6 +2,9 @@
 // Kept behind this interface so a faster backend (e.g. direct SQLite reads)
 // could be swapped in later without touching the UI.
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 function runJXA(script) {
   return new Promise((resolve, reject) => {
@@ -69,6 +72,8 @@ export async function fetchNoteList() {
   return notes.filter((n) => {
     if (seen.has(n.id)) return false;
     seen.add(n.id);
+    n.title = sanitize(n.title) || 'Untitled';
+    n.folder = sanitize(n.folder);
     return true;
   });
 }
@@ -78,19 +83,106 @@ export async function fetchNoteText(id) {
 (() => {
   const app = Application('Notes');
   const note = app.notes.byId(${JSON.stringify(id)});
-  let attachments = [];
-  try { attachments = note.attachments.name(); } catch (e) {}
-  return JSON.stringify({ text: note.plaintext(), attachments });
+  let ids = [], names = [];
+  try {
+    ids = note.attachments.id();
+    names = note.attachments.name();
+  } catch (e) {}
+  return JSON.stringify({ text: note.plaintext(), ids, names });
 })()`;
-  const { text, attachments } = JSON.parse(await runJXA(script));
+  const { text, ids, names } = JSON.parse(await runJXA(script));
+  const attachments = ids.map((attId, i) => ({ id: attId, name: sanitize(names[i]) || 'attachment' }));
+  const plain = sanitize(text);
   // U+FFFC marks inline attachments (images, tables) that plaintext can't
   // carry. They appear in the same order as the note's attachment list, so
   // substitute each marker with the matching filename.
   let i = 0;
-  return (text || '').replace(/￼/g, () => {
-    const name = attachments[i++];
+  const rendered = plain.replace(/￼/g, () => {
+    const name = attachments[i++]?.name;
     return name ? `[📎 ${name}]` : '[attachment]';
   });
+  return { text: rendered, plain: plain.replace(/￼/g, ''), attachments };
+}
+
+// Strips terminal control characters (C0/C1, DEL) so note content can't
+// inject escape sequences into the TUI. Keeps tab and newline.
+export function sanitize(s) {
+  return (s || '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+}
+
+// Exports an attachment through Notes.app (which can read its own container —
+// this process can't without Full Disk Access) and opens it with the default
+// app. Exports land in one temp dir per run and are reused on reopen.
+let exportDir = null;
+
+export async function openAttachment(noteId, attachment) {
+  if (!exportDir) exportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-cli-'));
+  const safe = (attachment.name || 'attachment').replace(/[/:]/g, '_');
+  const dest = path.join(exportDir, safe);
+  if (!fs.existsSync(dest)) {
+    const script = `
+(() => {
+  const app = Application('Notes');
+  const att = app.notes.byId(${JSON.stringify(noteId)}).attachments.byId(${JSON.stringify(attachment.id)});
+  app.save(att, { in: Path(${JSON.stringify(dest)}) });
+})()`;
+    await runJXA(script);
+    await dequarantine(dest);
+  }
+  await new Promise((resolve, reject) => {
+    execFile('open', [dest], (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+// Notes' `save` stamps exports with com.apple.quarantine (agent "Notes"),
+// which makes Preview & co. refuse the file as "damaged". Clear it for
+// documents, but leave Gatekeeper's check in place for anything runnable.
+const RUNNABLE = /\.(app|pkg|dmg|command|tool|sh|zsh|bash|scpt|scptd|applescript|workflow|action|terminal|jar|py|rb|pl|js)$/i;
+
+function dequarantine(file) {
+  if (RUNNABLE.test(file)) return Promise.resolve();
+  try {
+    if (fs.statSync(file).isDirectory() || fs.statSync(file).mode & 0o111) return Promise.resolve();
+  } catch { return Promise.resolve(); }
+  return new Promise((resolve) => {
+    execFile('xattr', ['-d', 'com.apple.quarantine', file], () => resolve());
+  });
+}
+
+// Notes bodies are HTML: each line becomes a <div>, and Notes derives the
+// note title from the first line.
+function textToHtml(text) {
+  const esc = (s) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .split('\n')
+    .map((line) => (line.trim() ? `<div>${esc(line)}</div>` : '<div><br></div>'))
+    .join('');
+}
+
+// Replaces the note's body with plain text. Rich formatting and inline
+// attachments in the old body are lost, which the user accepted for
+// in-terminal editing.
+export async function saveNoteText(id, text) {
+  const html = textToHtml(text);
+  const script = `
+(() => {
+  const app = Application('Notes');
+  app.notes.byId(${JSON.stringify(id)}).body = ${JSON.stringify(html)};
+})()`;
+  await runJXA(script);
+}
+
+// Creates a note in the default account's default folder; returns its id.
+export async function createNote(text) {
+  const script = `
+(() => {
+  const app = Application('Notes');
+  const note = app.Note({ body: ${JSON.stringify(textToHtml(text))} });
+  app.defaultAccount.notes.push(note);
+  return note.id();
+})()`;
+  return runJXA(script);
 }
 
 // Brings the note up in Notes.app itself. For password-protected notes this

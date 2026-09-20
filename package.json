@@ -1,14 +1,43 @@
 {
-  "name": "apple-notes-cli",
+  "name": "apple-notes-tui",
   "version": "1.0.0",
-  "description": "A clean terminal UI for Apple Notes",
+  "description": "A clean, zero-dependency terminal UI for browsing Apple Notes",
   "type": "module",
   "bin": {
     "notes": "bin/notes.js"
   },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "apple-notes",
+    "notes",
+    "tui",
+    "cli",
+    "terminal",
+    "macos",
+    "jxa"
+  ],
+  "homepage": "https://github.com/lordboba/apple-notes-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lordboba/apple-notes-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lordboba/apple-notes-cli/issues"
+  },
   "engines": {
     "node": ">=18"
   },
+  "os": [
+    "darwin"
+  ],
   "author": "Tyler Xiao",
   "license": "MIT"
 }
