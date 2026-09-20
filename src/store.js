@@ -127,9 +127,25 @@ export async function openAttachment(noteId, attachment) {
   app.save(att, { in: Path(${JSON.stringify(dest)}) });
 })()`;
     await runJXA(script);
+    await dequarantine(dest);
   }
   await new Promise((resolve, reject) => {
     execFile('open', [dest], (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+// Notes' `save` stamps exports with com.apple.quarantine (agent "Notes"),
+// which makes Preview & co. refuse the file as "damaged". Clear it for
+// documents, but leave Gatekeeper's check in place for anything runnable.
+const RUNNABLE = /\.(app|pkg|dmg|command|tool|sh|zsh|bash|scpt|scptd|applescript|workflow|action|terminal|jar|py|rb|pl|js)$/i;
+
+function dequarantine(file) {
+  if (RUNNABLE.test(file)) return Promise.resolve();
+  try {
+    if (fs.statSync(file).isDirectory() || fs.statSync(file).mode & 0o111) return Promise.resolve();
+  } catch { return Promise.resolve(); }
+  return new Promise((resolve) => {
+    execFile('xattr', ['-d', 'com.apple.quarantine', file], () => resolve());
   });
 }
 
