@@ -37,3 +37,11 @@ test('sanitize: strips terminal control sequences, keeps tab/newline', () => {
   assert.equal(sanitize('x\x1b]0;title\x07y'), 'x]0;titley');
   assert.equal(sanitize(null), '');
 });
+
+test('isTitleLine: exact match or ellipsis-truncated Notes title', async () => {
+  const { isTitleLine } = await import('../src/app.js');
+  assert.equal(isTitleLine('Groceries', 'Groceries '), true);
+  assert.equal(isTitleLine('A very long note title that Notes cuts off here', 'A very long note title that…'), true);
+  assert.equal(isTitleLine('Other', 'A very long…'), false);
+  assert.equal(isTitleLine('', ''), false);
+});

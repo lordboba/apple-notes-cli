@@ -630,10 +630,21 @@ function noteLines() {
   const { inner } = layout();
   let text = state.noteText;
   const first = text.split('\n', 1)[0];
-  if (state.note && first?.trim() === state.note.title.trim()) {
+  if (state.note && isTitleLine(first, state.note.title)) {
     text = text.slice(first.length).replace(/^\n+/, '');
   }
   return t.wrap(text, inner);
+}
+
+// Notes.app truncates long `name`s with an ellipsis, so also treat the line
+// as the title when it starts with the title minus its trailing ….
+export function isTitleLine(line, title) {
+  const l = (line || '').trim();
+  const tt = (title || '').trim();
+  if (!l || !tt) return false;
+  if (l === tt) return true;
+  const m = tt.match(/^(.*?)(…|\.\.\.)$/);
+  return !!m && m[1].length > 0 && l.startsWith(m[1].trimEnd());
 }
 
 function renderNote(l) {
