@@ -72,6 +72,8 @@ export async function fetchNoteList() {
   return notes.filter((n) => {
     if (seen.has(n.id)) return false;
     seen.add(n.id);
+    n.title = sanitize(n.title) || 'Untitled';
+    n.folder = sanitize(n.folder);
     return true;
   });
 }
@@ -89,16 +91,23 @@ export async function fetchNoteText(id) {
   return JSON.stringify({ text: note.plaintext(), ids, names });
 })()`;
   const { text, ids, names } = JSON.parse(await runJXA(script));
-  const attachments = ids.map((attId, i) => ({ id: attId, name: names[i] || 'attachment' }));
+  const attachments = ids.map((attId, i) => ({ id: attId, name: sanitize(names[i]) || 'attachment' }));
+  const plain = sanitize(text);
   // U+FFFC marks inline attachments (images, tables) that plaintext can't
   // carry. They appear in the same order as the note's attachment list, so
   // substitute each marker with the matching filename.
   let i = 0;
-  const rendered = (text || '').replace(/￼/g, () => {
+  const rendered = plain.replace(/￼/g, () => {
     const name = attachments[i++]?.name;
     return name ? `[📎 ${name}]` : '[attachment]';
   });
-  return { text: rendered, attachments };
+  return { text: rendered, plain: plain.replace(/￼/g, ''), attachments };
+}
+
+// Strips terminal control characters (C0/C1, DEL) so note content can't
+// inject escape sequences into the TUI. Keeps tab and newline.
+export function sanitize(s) {
+  return (s || '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 }
 
 // Exports an attachment through Notes.app (which can read its own container —

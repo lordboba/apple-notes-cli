@@ -51,7 +51,7 @@ both vim and emacs bindings are active by default (the `hybrid` keymap):
 | Top / bottom     | Home / End   | `gg` / `G`         | `M-<` / `M->`  |
 | Open note        | ↵            |                    |                |
 | Jump to note     | `1`–`9` (multi-digit works too) |  |                |
-| Prev / next note | ← / →        | `h` / `l`          |                |
+| Prev / next page (list) · note (note view) | ← / → | `h` / `l`  |                |
 | Back             | esc          |                    | `C-g`          |
 | Search titles    | `/`          |                    |                |
 | Open in Notes.app| `o`          |                    |                |

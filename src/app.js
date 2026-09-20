@@ -69,10 +69,16 @@ Keys:   press ? inside the UI for keybindings`);
 
 async function plainList() {
   const config = loadConfig();
-  const notes = sorted(await fetchNoteList(), config.sort);
-  const folderW = Math.min(20, Math.max(5, ...notes.map((n) => n.folder.length)));
+  let notes;
+  try {
+    notes = sorted(await fetchNoteList(), config.sort);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  const folderW = Math.min(20, Math.max(5, ...notes.map((n) => t.strWidth(n.folder))));
   for (const n of notes) {
-    console.log(`${fmtDate(n.modified).padEnd(13)} ${n.folder.padEnd(folderW)}  ${n.locked ? '🔒 ' : ''}${n.title}`);
+    console.log(`${fmtDate(n.modified).padEnd(13)} ${t.padEnd(t.truncate(n.folder, folderW), folderW)}  ${n.locked ? '🔒 ' : ''}${n.title}`);
   }
 }
 
@@ -93,6 +99,8 @@ function startTui() {
     console.error(err);
     process.exit(1);
   });
+  process.on('SIGTERM', exit);
+  process.on('SIGHUP', exit);
 
   process.stdout.write(t.altOn + t.mouseOn);
   render();
@@ -169,13 +177,13 @@ async function openNote(item) {
 
   startSpinner();
   try {
-    const { text, attachments } = await fetchNoteText(item.id);
+    const { text, plain, attachments } = await fetchNoteText(item.id);
     if (item.locked && !text.trim()) {
       // Locked notes read as empty until unlocked in Notes.app. Don't cache,
       // so reopening after an unlock picks up the real text.
       if (state.note?.id === item.id) state.noteText = LOCKED_TEXT;
     } else {
-      state.bodyCache.set(item.id, { text, attachments });
+      state.bodyCache.set(item.id, { text, plain, attachments });
       if (state.note?.id === item.id) { state.noteText = text; state.noteAtts = attachments; }
     }
   } catch (err) {
@@ -369,10 +377,10 @@ function stepNote(dir) {
 // formatting and drops inline attachments — accepted trade-off for `e`.
 async function editNote(item) {
   if (item.locked) { state.toast = '⚠ Locked note — unlock it in Notes.app first (o)'; return render(); }
-  let text = state.bodyCache.get(item.id)?.text;
+  let text = state.bodyCache.get(item.id)?.plain;
   if (text === undefined) {
     startSpinner();
-    try { text = (await fetchNoteText(item.id)).text; }
+    try { text = (await fetchNoteText(item.id)).plain; }
     catch (err) { state.toast = `⚠ ${err.message.split('\n')[0]}`; return render(); }
     finally { stopSpinner(); }
   }
@@ -385,7 +393,7 @@ async function editNote(item) {
   render();
   try {
     await saveNoteText(item.id, edited);
-    state.bodyCache.set(item.id, { text: edited, attachments: [] });
+    state.bodyCache.set(item.id, { text: edited, plain: edited, attachments: [] });
     if (state.note?.id === item.id) {
       state.noteText = edited;
       state.noteAtts = [];
@@ -402,8 +410,9 @@ async function editNote(item) {
 // Suspends the TUI and runs $EDITOR on a temp file seeded with `initial`.
 // Returns the buffer contents, or null (with a toast set) on editor failure.
 async function runEditor(initial) {
-  const file = path.join(os.tmpdir(), `notes-edit-${process.pid}.txt`);
-  fs.writeFileSync(file, initial);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-edit-'));
+  const file = path.join(dir, 'note.txt');
+  fs.writeFileSync(file, initial, { mode: 0o600 });
   const [cmd, ...args] = (process.env.VISUAL || process.env.EDITOR || 'vim').split(' ');
   suspendTui();
   const code = await new Promise((resolve) => {
@@ -414,7 +423,8 @@ async function runEditor(initial) {
   resumeTui();
 
   let edited = null;
-  try { edited = fs.readFileSync(file, 'utf8'); fs.unlinkSync(file); } catch {}
+  try { edited = fs.readFileSync(file, 'utf8'); } catch {}
+  fs.rmSync(dir, { recursive: true, force: true });
   if (code !== 0 || edited === null) {
     state.toast = `⚠ ${cmd} ${code === -1 ? 'could not be started' : `exited with ${code}`} — nothing saved`;
     return null;
