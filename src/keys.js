@@ -2,6 +2,8 @@
 
 // Turns a raw stdin string into a list of key names like:
 // 'a', 'G', 'ctrl+d', 'meta+v', 'up', 'pagedown', 'enter', 'escape', 'space'.
+// Mouse input (SGR mode) yields 'wheelup'/'wheeldown' for the scroll wheel
+// and a { x, y } object (1-based screen cells) for a left-button press.
 export function parseInput(str) {
   const keys = [];
   let i = 0;
@@ -23,7 +25,15 @@ export function parseInput(str) {
           '1~': 'home', '3~': 'delete', '4~': 'end',
           '5~': 'pageup', '6~': 'pagedown',
         };
-        if (map[full]) keys.push(map[full]);
+        if (full[0] === '<' && /[Mm]$/.test(full)) {
+          // SGR mouse report: \x1b[<button;x;y then M (press) or m (release)
+          const [b, x, y] = full.slice(1, -1).split(';').map(Number);
+          if (full.endsWith('M')) {
+            if (b === 64) keys.push('wheelup');
+            else if (b === 65) keys.push('wheeldown');
+            else if (b === 0) keys.push({ x, y });
+          }
+        } else if (map[full]) keys.push(map[full]);
         i = j + 1;
       } else if (next !== undefined) {
         keys.push('meta+' + next);
@@ -72,6 +82,9 @@ const COMMON = {
   prev: ['left'],
   next: ['right'],
   openExternal: ['o'],
+  openFile: ['a'],
+  edit: ['e'],
+  new: ['n'],
   quit: ['q', 'ctrl+c'],
   help: ['?'],
   refresh: ['r'],

@@ -15,6 +15,14 @@ A fast, clean TUI for browsing your Apple Notes from the terminal. Zero dependen
 ## Install
 
 ```sh
+npm install -g apple-notes-tui
+notes
+```
+
+Or from source:
+
+```sh
+git clone https://github.com/lordboba/apple-notes-cli.git
 cd apple-notes-cli
 npm install -g .     # or: npm link
 notes
@@ -47,15 +55,28 @@ both vim and emacs bindings are active by default (the `hybrid` keymap):
 | Back             | esc          |                    | `C-g`          |
 | Search titles    | `/`          |                    |                |
 | Open in Notes.app| `o`          |                    |                |
+| Open attachment  | `a` (or `1`–`9`) |                |                |
+| Edit note        | `e`          |                    |                |
+| New note         | `n`          |                    |                |
 | Refresh / reload | `r`          |                    |                |
 | Settings         | `s`          |                    |                |
 | Help             | `?`          |                    |                |
 | Quit             | `q`, `C-c`   |                    |                |
 
 In the note view, ←/→ (or `h`/`l`) move between notes without going back to
-the list.
+the list. In the list, ←/→ flip whole pages.
 
-Inline attachments show as `[📎 filename]`. Locked notes are marked with 🔒;
+The mouse works too: click a note to open it, click a settings row to change
+it, scroll with the wheel, and click the `×` in the top-right corner to quit.
+(Terminals reserve text selection while mouse mode is on — hold Shift or Fn
+to select text as usual.)
+
+Inline attachments show as `[📎 filename]` — click one (or press `a` for the
+first, `1`–`9` for the nth) to open it with its default macOS app. Under the
+hood, Notes.app exports the file to a temp directory first, since attachment
+files aren't directly readable without Full Disk Access.
+
+Locked notes are marked with 🔒;
 macOS only lets Notes.app itself take the password or Touch ID prompt, so
 press `o` to unlock a note there, then `r` back in the TUI to reload its
 text.
@@ -92,5 +113,12 @@ by pressing `s`:
 - `src/keys.js` parses raw stdin and resolves keymaps/chords.
 - `src/term.js` handles ANSI styling and emoji/CJK-aware text layout.
 
-Read-only by design — it never modifies your notes. "Recently Deleted" and
-password-locked note contents are not shown.
+Browsing never modifies your notes. Writes happen only through `e` (edit) and
+`n` (new): the note's plain text opens in `$VISUAL`/`$EDITOR`, and saving
+writes it back to Apple Notes — `n` starts from an empty buffer and creates
+the note in your default folder (first line becomes the title; quit without
+writing anything and no note is created). **Edits replace the whole note
+body** — rich formatting
+(bold, checklists, tables) is flattened to plain text and inline attachments
+are dropped from the edited note. "Recently Deleted" and password-locked note
+contents are not shown.

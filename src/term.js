@@ -2,6 +2,8 @@
 
 export const altOn = '\x1b[?1049h\x1b[?25l'; // alt screen + hide cursor
 export const altOff = '\x1b[?1049l\x1b[?25h'; // restore screen + show cursor
+export const mouseOn = '\x1b[?1000h\x1b[?1006h'; // click + wheel reporting (SGR)
+export const mouseOff = '\x1b[?1006l\x1b[?1000l';
 export const home = '\x1b[H';
 export const clearBelow = '\x1b[0J';
 export const clearLine = '\x1b[K';

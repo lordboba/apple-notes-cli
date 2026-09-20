@@ -1,11 +1,13 @@
 // Main TUI: state, key handling, and rendering for all views.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as t from './term.js';
 import { loadConfig, saveConfig, configPath } from './config.js';
 import { parseInput, effectiveBindings, actionFor, prettyKey } from './keys.js';
-import { fetchNoteList, fetchNoteText, openInNotes } from './store.js';
+import { fetchNoteList, fetchNoteText, openInNotes, openAttachment, saveNoteText, createNote } from './store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
@@ -37,7 +39,9 @@ const state = {
   pending: null, // chord prefix (e.g. 'g')
   note: null,
   noteText: null,
+  noteAtts: [],
   noteScroll: 0,
+  toast: null,
   bodyCache: new Map(),
   settingsSel: 0,
   spinner: 0,
@@ -90,7 +94,7 @@ function startTui() {
     process.exit(1);
   });
 
-  process.stdout.write(t.altOn);
+  process.stdout.write(t.altOn + t.mouseOn);
   render();
   loadList();
 }
@@ -98,7 +102,7 @@ function startTui() {
 function restoreTerminal() {
   clearInterval(state.spinTimer);
   clearTimeout(state.digitTimer);
-  process.stdout.write(t.altOff);
+  process.stdout.write(t.mouseOff + t.altOff);
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
 }
 
@@ -158,19 +162,21 @@ async function openNote(item) {
   state.view = 'note';
   state.note = item;
   state.noteScroll = 0;
-  state.noteText = state.bodyCache.get(item.id) ?? null;
-  if (state.noteText !== null) return render();
+  const cached = state.bodyCache.get(item.id);
+  state.noteText = cached?.text ?? null;
+  state.noteAtts = cached?.attachments ?? [];
+  if (cached) return render();
 
   startSpinner();
   try {
-    const text = await fetchNoteText(item.id);
+    const { text, attachments } = await fetchNoteText(item.id);
     if (item.locked && !text.trim()) {
       // Locked notes read as empty until unlocked in Notes.app. Don't cache,
       // so reopening after an unlock picks up the real text.
       if (state.note?.id === item.id) state.noteText = LOCKED_TEXT;
     } else {
-      state.bodyCache.set(item.id, text);
-      if (state.note?.id === item.id) state.noteText = text;
+      state.bodyCache.set(item.id, { text, attachments });
+      if (state.note?.id === item.id) { state.noteText = text; state.noteAtts = attachments; }
     }
   } catch (err) {
     if (state.note?.id === item.id) state.noteText = `⚠ Could not load note: ${err.message}`;
@@ -183,9 +189,13 @@ async function openNote(item) {
 // -------------------------------------------------------------------- keys
 
 function handleKey(key) {
+  state.toast = null;
+  if (typeof key !== 'string') return handleClick(key);
+  if (key === 'wheelup' || key === 'wheeldown') return handleWheel(key);
   if (key === 'ctrl+c') return exit();
   if (state.searching) return handleSearchKey(key);
   if (state.view === 'list' && /^[0-9]$/.test(key)) return handleDigit(key);
+  if (state.view === 'note' && /^[1-9]$/.test(key)) return openFileAt(+key - 1);
 
   const { action, pending } = actionFor(state.bindings, key, state.pending);
   state.pending = pending;
@@ -213,8 +223,72 @@ function handleKey(key) {
       if (state.view === 'list') { state.searching = true; }
       break;
     case 'back': handleBack(); break;
+    case 'edit': {
+      const target = state.view === 'note' ? state.note : state.view === 'list' ? filtered()[state.sel] : null;
+      if (target) editNote(target);
+      return;
+    }
+    case 'new':
+      if (state.view === 'list' || state.view === 'note') newNote();
+      return;
     default: handleViewAction(action); break;
   }
+  render();
+}
+
+// Screen rows are 1-based: row 2 is the header (with the × close button at
+// the right edge), rows 4+ are the list/settings rows (blank, header, box top).
+function handleClick({ x, y }) {
+  const { W } = layout();
+  if (y === 2 && x >= W - 2 && x <= W + 2) return exit();
+  if (state.view === 'list') {
+    const page = currentPageItems();
+    const idx = y - 4;
+    if (idx >= 0 && idx < page.length) {
+      state.sel = pageStart() + idx;
+      openNote(page[idx]);
+    }
+  } else if (state.view === 'settings') {
+    const idx = y - 4;
+    if (idx === 0 || idx === 1) {
+      if (state.settingsSel === idx) cycleSetting(1);
+      else state.settingsSel = idx;
+      render();
+    }
+  } else if (state.view === 'note') {
+    const idx = attachmentAtClick(x, y);
+    if (idx >= 0) openFileAt(idx);
+  }
+}
+
+// Maps a click in the note body to an attachment index. Clicking anywhere on
+// a line holding a [📎 …] marker counts as clicking the file; when a line has
+// several markers, x picks the one left of the click. Body rows start at
+// screen row 5 (blank, title, meta, box top).
+function attachmentAtClick(x, y) {
+  const { bodyRows } = layout();
+  const body = noteLines();
+  const lineIdx = y - 5 + state.noteScroll;
+  if (y < 5 || y >= 5 + bodyRows || lineIdx < 0 || lineIdx >= body.length) return -1;
+  const line = body[lineIdx];
+  if (!line.includes('📎')) return -1;
+
+  let before = 0;
+  for (let i = 0; i < lineIdx; i++) before += (body[i].match(/📎/g) || []).length;
+  const rel = x - 4; // box border + padding sit left of the text
+  let col = 0, seen = 0, pick = 0;
+  for (const ch of line) {
+    if (ch === '📎' && (col <= rel || seen === 0)) pick = seen;
+    if (ch === '📎') seen++;
+    col += t.strWidth(ch);
+  }
+  return before + pick;
+}
+
+function handleWheel(key) {
+  const action = key === 'wheelup' ? 'up' : 'down';
+  const steps = state.view === 'note' ? 3 : 1;
+  for (let i = 0; i < steps; i++) handleViewAction(action);
   render();
 }
 
@@ -238,8 +312,8 @@ function listAction(action) {
   switch (action) {
     case 'down': state.sel = clamp(state.sel + 1); break;
     case 'up': state.sel = clamp(state.sel - 1); break;
-    case 'pageDown': state.sel = clamp(state.sel + page); break;
-    case 'pageUp': state.sel = clamp(state.sel - page); break;
+    case 'pageDown': case 'next': state.sel = clamp(state.sel + page); break;
+    case 'pageUp': case 'prev': state.sel = clamp(state.sel - page); break;
     case 'top': state.sel = 0; break;
     case 'bottom': state.sel = max; break;
     case 'open':
@@ -263,7 +337,24 @@ function noteAction(action) {
     case 'bottom': state.noteScroll = maxScroll; break;
     case 'prev': stepNote(-1); break;
     case 'next': stepNote(1); break;
+    case 'openFile': openFileAt(0); break;
   }
+}
+
+// Exports the i-th attachment through Notes.app and opens it with the
+// default macOS app for its file type.
+async function openFileAt(i) {
+  const att = state.noteAtts[i];
+  if (!att || !state.note) return;
+  state.toast = `Opening ${att.name}…`;
+  render();
+  try {
+    await openAttachment(state.note.id, att);
+    state.toast = null;
+  } catch (err) {
+    state.toast = `⚠ Could not open: ${(err.message || 'failed').split('\n')[0]}`;
+  }
+  render();
 }
 
 function stepNote(dir) {
@@ -271,6 +362,101 @@ function stepNote(dir) {
   const idx = items.findIndex((n) => n.id === state.note?.id);
   const target = items[idx + dir];
   if (target) { state.sel = idx + dir; openNote(target); }
+}
+
+// Hands the note text to $EDITOR in the real terminal (TUI suspended), then
+// writes any changes back to Apple Notes. The overwrite flattens rich
+// formatting and drops inline attachments — accepted trade-off for `e`.
+async function editNote(item) {
+  if (item.locked) { state.toast = '⚠ Locked note — unlock it in Notes.app first (o)'; return render(); }
+  let text = state.bodyCache.get(item.id)?.text;
+  if (text === undefined) {
+    startSpinner();
+    try { text = (await fetchNoteText(item.id)).text; }
+    catch (err) { state.toast = `⚠ ${err.message.split('\n')[0]}`; return render(); }
+    finally { stopSpinner(); }
+  }
+
+  const edited = await runEditor(text);
+  if (edited === null) return render();
+  if (edited === text) { state.toast = 'No changes'; return render(); }
+
+  state.toast = 'Saving…';
+  render();
+  try {
+    await saveNoteText(item.id, edited);
+    state.bodyCache.set(item.id, { text: edited, attachments: [] });
+    if (state.note?.id === item.id) {
+      state.noteText = edited;
+      state.noteAtts = [];
+      state.note.title = (edited.split('\n', 1)[0] || 'Untitled').trim() || 'Untitled';
+    }
+    state.toast = '✓ Saved to Apple Notes';
+    loadList(); // pick up new title/modified date in the list
+  } catch (err) {
+    state.toast = `⚠ Save failed: ${err.message.split('\n')[0]}`;
+  }
+  render();
+}
+
+// Suspends the TUI and runs $EDITOR on a temp file seeded with `initial`.
+// Returns the buffer contents, or null (with a toast set) on editor failure.
+async function runEditor(initial) {
+  const file = path.join(os.tmpdir(), `notes-edit-${process.pid}.txt`);
+  fs.writeFileSync(file, initial);
+  const [cmd, ...args] = (process.env.VISUAL || process.env.EDITOR || 'vim').split(' ');
+  suspendTui();
+  const code = await new Promise((resolve) => {
+    const child = spawn(cmd, [...args, file], { stdio: 'inherit' });
+    child.on('exit', resolve);
+    child.on('error', () => resolve(-1));
+  });
+  resumeTui();
+
+  let edited = null;
+  try { edited = fs.readFileSync(file, 'utf8'); fs.unlinkSync(file); } catch {}
+  if (code !== 0 || edited === null) {
+    state.toast = `⚠ ${cmd} ${code === -1 ? 'could not be started' : `exited with ${code}`} — nothing saved`;
+    return null;
+  }
+  return edited;
+}
+
+// Drafts a new note in $EDITOR; saving a non-empty buffer creates it in the
+// default folder and selects it in the list.
+async function newNote() {
+  const edited = await runEditor('');
+  if (edited === null) return render();
+  if (!edited.trim()) { state.toast = 'Empty buffer — no note created'; return render(); }
+
+  state.toast = 'Creating…';
+  render();
+  try {
+    const id = await createNote(edited);
+    state.view = 'list';
+    state.note = null;
+    await loadList();
+    const idx = filtered().findIndex((note) => note.id === id);
+    if (idx >= 0) state.sel = idx;
+    state.toast = '✓ Note created';
+  } catch (err) {
+    state.toast = `⚠ Create failed: ${err.message.split('\n')[0]}`;
+  }
+  render();
+}
+
+function suspendTui() {
+  stopSpinner();
+  process.stdout.write(t.mouseOff + t.altOff);
+  process.stdin.setRawMode(false);
+  process.stdin.pause();
+}
+
+function resumeTui() {
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdout.write(t.altOn + t.mouseOn);
+  render();
 }
 
 function settingsAction(action) {
@@ -366,9 +552,10 @@ function render() {
 }
 
 function header(title, right, W) {
+  const rightPlain = right ? right + '  ×' : '×';
   const leftPlain = ' ✳ ' + title;
-  const pad = Math.max(1, W - t.strWidth(leftPlain) - t.strWidth(right));
-  return ' ' + t.accent('✳ ') + t.bold(title) + ' '.repeat(pad) + t.dim(right);
+  const pad = Math.max(1, W - t.strWidth(leftPlain) - t.strWidth(rightPlain));
+  return ' ' + t.accent('✳ ') + t.bold(title) + ' '.repeat(pad) + t.dim(rightPlain);
 }
 
 function boxTop(W) { return ' ' + t.dim('╭' + '─'.repeat(W - 2) + '╮'); }
@@ -422,7 +609,8 @@ function renderList(l) {
 
 function listFooter(inner) {
   if (state.searching) return '  ' + t.accent('/ ') + state.query + t.accent('█');
-  let hints = '↵ open · 1-9 jump · / search · r refresh · s settings · ? help · q quit';
+  if (state.toast) return '  ' + t.accent(t.truncate(state.toast, inner + 2));
+  let hints = '↵ open · 1-9 jump · ←→ page · / search · n new · e edit · r refresh · s settings · ? help · q quit';
   if (state.digits) return '  ' + t.accent(`→ ${state.digits}`) + '  ' + t.dim(t.truncate(hints, inner - 8));
   return '  ' + t.dim(t.truncate(hints, inner + 2));
 }
@@ -444,9 +632,11 @@ function renderNote(l) {
   const meta = `${note.folder} · edited ${fmtDate(note.modified)}` +
     (note.created ? ` · created ${fmtDate(note.created)}` : '');
 
+  const title = t.truncate((note.locked ? '🔒 ' : '') + note.title, W - 8);
+  const titlePad = Math.max(1, W - t.strWidth(' ✳ ' + title) - 1);
   const lines = [
     '',
-    ' ' + t.accent('✳ ') + t.bold(t.truncate((note.locked ? '🔒 ' : '') + note.title, W - 4)),
+    ' ' + t.accent('✳ ') + t.bold(title) + ' '.repeat(titlePad) + t.dim('×'),
     ' ' + t.dim(t.truncate(meta, W - 2)),
     boxTop(W),
   ];
@@ -468,14 +658,18 @@ function renderNote(l) {
   const pct = body.length
     ? Math.min(100, Math.round(((state.noteScroll + bodyRows) / Math.max(body.length, bodyRows)) * 100))
     : 100;
-  lines.push('  ' + t.dim(t.truncate(`${pct}% · ↑↓ scroll · space page · ←→ prev/next · o Notes.app · esc back · q quit`, inner + 2)));
+  const fileHint = state.noteAtts.length ? 'a/1-9/click open file · ' : '';
+  const footer = `${pct}% · ${fileHint}↑↓ scroll · space page · ←→ prev/next · e edit · o Notes.app · esc back · q quit`;
+  lines.push('  ' + (state.toast
+    ? t.accent(t.truncate(state.toast, inner + 2))
+    : t.dim(t.truncate(footer, inner + 2))));
   return lines;
 }
 
 function renderHelp(l) {
-  const { W } = l;
-  const rows = [
-    ['1-9', 'Open note by number'],
+  const { W, cols, rows } = l;
+  const entries = [
+    ['1-9', 'Open note / attachment by number'],
     ['down', 'Move down'],
     ['up', 'Move up'],
     ['pageDown', 'Page down'],
@@ -483,28 +677,53 @@ function renderHelp(l) {
     ['top', 'Go to top'],
     ['bottom', 'Go to bottom'],
     ['open', 'Open note'],
-    ['prev', 'Previous note (in note view)'],
-    ['next', 'Next note (in note view)'],
+    ['prev', 'Page back (list) / previous note (note view)'],
+    ['next', 'Page forward (list) / next note (note view)'],
     ['search', 'Search titles'],
     ['back', 'Back / clear search'],
     ['openExternal', 'Open in Notes.app (unlock locked notes there)'],
+    ['openFile', 'Open attachment in its default app (note view)'],
+    ['edit', 'Edit in $EDITOR, saved back to Apple Notes'],
+    ['new', 'New note drafted in $EDITOR'],
     ['refresh', 'Refresh notes / reload note'],
     ['settings', 'Settings'],
     ['help', 'Toggle this help'],
     ['quit', 'Quit'],
-  ];
-
-  const lines = ['', header('Keyboard', `keymap: ${state.config.keymap}`, W), ''];
-  for (const [action, desc] of rows) {
+  ].map(([action, desc]) => {
     const keys = action === '1-9'
       ? '1-9'
       : (state.bindings[action] || []).map(prettyKey).join('  ');
-    lines.push('   ' + t.accent(t.padEnd(t.truncate(keys, 30), 30)) + ' ' + desc);
+    return [keys, desc];
+  });
+  entries.push(['click', 'Open note / attachment / setting'], ['click ×', 'Quit'], ['wheel', 'Scroll']);
+
+  const lines = ['', header('Keyboard', `keymap: ${state.config.keymap}`, W), ''];
+  const tail = ['', '   ' + t.dim(`Add your own keys in ${configPath}`), '', '  ' + t.dim('esc back')];
+
+  // Wrap into extra columns when the rows won't fit the terminal height.
+  const avail = Math.max(3, rows - 1 - lines.length - tail.length);
+  const maxKeyW = Math.min(30, Math.max(...entries.map(([keys]) => t.strWidth(keys))));
+  const nCols = Math.max(1, Math.min(
+    Math.ceil(entries.length / avail),
+    Math.floor((cols - 3) / 34), // each column needs room for keys + a short description
+  ));
+  const colH = Math.ceil(entries.length / nCols);
+  const cellW = Math.floor((cols - 3) / nCols) - 2;
+  const keyW = nCols === 1 ? maxKeyW : Math.min(maxKeyW, Math.max(12, cellW - 20));
+
+  for (let r = 0; r < colH; r++) {
+    let line = '   ';
+    for (let c = 0; c < nCols; c++) {
+      const entry = entries[c * colH + r];
+      if (!entry) break;
+      const [keys, desc] = entry;
+      const d = t.truncate(desc, Math.max(6, (nCols === 1 ? cols - 4 : cellW) - keyW - 1));
+      line += t.accent(t.padEnd(t.truncate(keys, keyW), keyW)) + ' ' + d;
+      if (c < nCols - 1) line += ' '.repeat(Math.max(2, cellW - keyW - 1 - t.strWidth(d) + 2));
+    }
+    lines.push(line);
   }
-  lines.push('');
-  lines.push('   ' + t.dim(`Add your own keys in ${configPath}`));
-  lines.push('');
-  lines.push('  ' + t.dim('esc back'));
+  lines.push(...tail);
   return lines;
 }
 
